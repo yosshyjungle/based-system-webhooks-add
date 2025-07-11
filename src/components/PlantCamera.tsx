@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Camera, Upload, Leaf, Heart, Star, X, RotateCcw } from 'lucide-react';
+import { Camera, Upload, Leaf, Heart, Star, X, RotateCcw, Smartphone, Monitor } from 'lucide-react';
 
 interface PlantCameraProps {
     userId: string;
@@ -27,10 +27,56 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
     const [stream, setStream] = useState<MediaStream | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+    const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
+    const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+
+    // 使用可能なカメラデバイスを取得
+    const getAvailableCameras = useCallback(async () => {
+        try {
+            // MediaDevicesがサポートされているかチェック
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                setError('このブラウザはカメラ機能をサポートしていません。');
+                return;
+            }
+
+            // まず権限を要求（短時間のストリームを作成して権限を取得）
+            const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+            tempStream.getTracks().forEach(track => track.stop()); // すぐに停止
+
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(device => device.kind === 'videoinput');
+            setAvailableCameras(videoDevices);
+
+            // デフォルトでリアカメラ（環境カメラ）を選択
+            const rearCamera = videoDevices.find(device =>
+                device.label.toLowerCase().includes('back') ||
+                device.label.toLowerCase().includes('rear') ||
+                device.label.toLowerCase().includes('environment')
+            );
+
+            if (rearCamera) {
+                setSelectedDeviceId(rearCamera.deviceId);
+            } else if (videoDevices.length > 0) {
+                setSelectedDeviceId(videoDevices[0].deviceId);
+            }
+        } catch (err) {
+            console.error('カメラデバイス取得エラー:', err);
+            if (err instanceof Error && err.name === 'NotAllowedError') {
+                setError('カメラの使用が許可されていません。ブラウザの設定でカメラの使用を許可してください。');
+            } else {
+                setError('カメラデバイスの取得に失敗しました。デバイスにカメラが接続されているか確認してください。');
+            }
+        }
+    }, []);
+
+    useEffect(() => {
+        // コンポーネントマウント時に一度だけ実行
+        getAvailableCameras();
+    }, [getAvailableCameras]);
 
     // Mock植物データベース
     const mockPlants: PlantData[] = [
@@ -86,11 +132,16 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
         try {
             setError(null);
 
-            const constraints = {
-                video: {
+            // より柔軟な制約設定
+            const constraints: MediaStreamConstraints = {
+                video: selectedDeviceId ? {
+                    deviceId: { exact: selectedDeviceId },
+                    width: { ideal: 1280, max: 1920 },
+                    height: { ideal: 720, max: 1080 }
+                } : {
                     facingMode: facingMode,
-                    width: { ideal: 1280 },
-                    height: { ideal: 720 }
+                    width: { ideal: 1280, max: 1920 },
+                    height: { ideal: 720, max: 1080 }
                 }
             };
 
@@ -100,12 +151,30 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
 
             if (videoRef.current) {
                 videoRef.current.srcObject = mediaStream;
+                // ビデオの再生を確実にする
+                videoRef.current.play().catch(err => {
+                    console.error('ビデオ再生エラー:', err);
+                });
             }
         } catch (err) {
             console.error('カメラアクセスエラー:', err);
-            setError('カメラにアクセスできませんでした。ブラウザの設定を確認してください。');
+            let errorMessage = 'カメラにアクセスできませんでした。';
+
+            if (err instanceof Error) {
+                if (err.name === 'NotAllowedError') {
+                    errorMessage = 'カメラの使用が許可されていません。ブラウザの設定でカメラの使用を許可してください。';
+                } else if (err.name === 'NotFoundError') {
+                    errorMessage = 'カメラが見つかりませんでした。デバイスにカメラが接続されているか確認してください。';
+                } else if (err.name === 'NotReadableError') {
+                    errorMessage = 'カメラは他のアプリケーションで使用中です。';
+                } else if (err.name === 'OverconstrainedError') {
+                    errorMessage = 'カメラの設定に問題があります。他のカメラを試してください。';
+                }
+            }
+
+            setError(errorMessage);
         }
-    }, [facingMode]);
+    }, [facingMode, selectedDeviceId]);
 
     // カメラストリームの停止
     const stopCamera = useCallback(() => {
@@ -146,13 +215,27 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
         stopCamera();
     }, [stopCamera]);
 
-    // カメラの向きを切り替え
-    const switchCamera = useCallback(() => {
+    // カメラの向きを切り替え（facingMode使用）
+    const switchCameraFacing = useCallback(() => {
         setFacingMode(prev => prev === 'user' ? 'environment' : 'user');
+        setSelectedDeviceId(''); // デバイスIDをリセット
         if (isCameraOpen) {
             stopCamera();
             // 少し待ってから新しい向きでカメラを開始
-            setTimeout(startCamera, 100);
+            setTimeout(() => {
+                startCamera();
+            }, 100);
+        }
+    }, [isCameraOpen, stopCamera, startCamera]);
+
+    // 特定のカメラデバイスに切り替え
+    const switchToCamera = useCallback((deviceId: string) => {
+        setSelectedDeviceId(deviceId);
+        if (isCameraOpen) {
+            stopCamera();
+            setTimeout(() => {
+                startCamera();
+            }, 100);
         }
     }, [isCameraOpen, stopCamera, startCamera]);
 
@@ -263,26 +346,71 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
             {/* カメラビュー */}
             {isCameraOpen && (
                 <div className="space-y-4 mb-6">
+                    {/* カメラ選択ボタン */}
+                    {availableCameras.length > 1 && (
+                        <div className="flex space-x-2 mb-4">
+                            {availableCameras.map((camera, index) => {
+                                const isRearCamera = camera.label.toLowerCase().includes('back') ||
+                                    camera.label.toLowerCase().includes('rear') ||
+                                    camera.label.toLowerCase().includes('environment');
+                                const isFrontCamera = camera.label.toLowerCase().includes('front') ||
+                                    camera.label.toLowerCase().includes('user') ||
+                                    camera.label.toLowerCase().includes('face');
+
+                                return (
+                                    <button
+                                        key={camera.deviceId}
+                                        onClick={() => switchToCamera(camera.deviceId)}
+                                        className={`flex-1 p-3 rounded-lg border-2 transition-all ${selectedDeviceId === camera.deviceId
+                                            ? 'border-green-500 bg-green-50 text-green-700'
+                                            : 'border-gray-300 bg-white text-gray-700 hover:border-gray-400'
+                                            }`}
+                                    >
+                                        <div className="flex items-center justify-center space-x-2">
+                                            {isRearCamera ? (
+                                                <Monitor className="w-5 h-5" />
+                                            ) : isFrontCamera ? (
+                                                <Smartphone className="w-5 h-5" />
+                                            ) : (
+                                                <Camera className="w-5 h-5" />
+                                            )}
+                                            <span className="text-sm font-medium">
+                                                {isRearCamera ? 'リアカメラ' :
+                                                    isFrontCamera ? 'フロントカメラ' :
+                                                        `カメラ${index + 1}`}
+                                            </span>
+                                        </div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                    )}
+
                     <div className="relative bg-black rounded-lg overflow-hidden">
                         <video
                             ref={videoRef}
                             autoPlay
                             playsInline
+                            muted
                             className="w-full h-64 object-cover"
                         />
 
                         {/* カメラコントロール */}
                         <div className="absolute bottom-4 left-0 right-0 flex justify-center space-x-4">
-                            <button
-                                onClick={switchCamera}
-                                className="bg-white bg-opacity-20 hover:bg-opacity-30 text-white p-3 rounded-full transition-all"
-                            >
-                                <RotateCcw className="w-6 h-6" />
-                            </button>
+                            {availableCameras.length > 1 && (
+                                <button
+                                    onClick={switchCameraFacing}
+                                    className="bg-white bg-opacity-20 hover:bg-opacity-30 text-white p-3 rounded-full transition-all"
+                                    title="カメラを切り替え"
+                                >
+                                    <RotateCcw className="w-6 h-6" />
+                                </button>
+                            )}
 
                             <button
                                 onClick={capturePhoto}
                                 className="bg-white hover:bg-gray-100 text-gray-800 p-4 rounded-full transition-all shadow-lg"
+                                title="写真を撮影"
                             >
                                 <Camera className="w-8 h-8" />
                             </button>
@@ -290,9 +418,21 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                             <button
                                 onClick={stopCamera}
                                 className="bg-red-500 bg-opacity-80 hover:bg-opacity-100 text-white p-3 rounded-full transition-all"
+                                title="カメラを閉じる"
                             >
                                 <X className="w-6 h-6" />
                             </button>
+                        </div>
+
+                        {/* 現在のカメラ表示 */}
+                        <div className="absolute top-4 left-4 bg-black bg-opacity-50 text-white px-3 py-1 rounded-full text-sm">
+                            {selectedDeviceId ? (
+                                availableCameras.find(cam => cam.deviceId === selectedDeviceId)?.label.includes('back') ||
+                                    availableCameras.find(cam => cam.deviceId === selectedDeviceId)?.label.includes('rear') ?
+                                    'リアカメラ' : 'フロントカメラ'
+                            ) : (
+                                facingMode === 'environment' ? 'リアカメラ' : 'フロントカメラ'
+                            )}
                         </div>
                     </div>
 
@@ -347,6 +487,17 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                             <li>• AI が自動で植物を認識</li>
                             <li>• 食べられる草花は恐竜のエサに</li>
                             <li>• 新種発見でボーナス！</li>
+                        </ul>
+                    </div>
+
+                    {/* トラブルシューティング */}
+                    <div className="bg-blue-50 rounded-lg p-4">
+                        <h3 className="font-semibold text-blue-800 mb-2">🔧 カメラが起動しない場合</h3>
+                        <ul className="text-sm text-blue-700 space-y-1">
+                            <li>• ブラウザでカメラの使用を許可してください</li>
+                            <li>• 他のアプリでカメラを使用していないか確認</li>
+                            <li>• ページを再読み込みして再試行</li>
+                            <li>• HTTPS接続が必要です（HTTPでは動作しません）</li>
                         </ul>
                     </div>
                 </div>

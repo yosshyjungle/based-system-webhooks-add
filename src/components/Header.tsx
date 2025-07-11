@@ -11,9 +11,9 @@ export default function Header() {
         <div className="flex items-center justify-between">
           {/* ロゴ・タイトル */}
           <div className="flex items-center space-x-2">
-            <div className="text-xl md:text-2xl">💬</div>
+            <div className="text-xl md:text-2xl">🦕</div>
             <h1 className="text-lg md:text-xl font-bold text-gray-900">
-              チャットアプリ
+              DinoWalk
             </h1>
           </div>
 
@@ -26,7 +26,7 @@ export default function Header() {
                 </button>
               </SignInButton>
             </SignedOut>
-            
+
             <SignedIn>
               <div className="flex items-center space-x-3">
                 {/* ユーザー情報 */}
@@ -36,7 +36,7 @@ export default function Header() {
                     {user?.firstName || user?.username || 'ユーザー'}
                   </span>
                 </div>
-                
+
                 {/* ユーザーボタン（プロフィール・ログアウト） */}
                 <UserButton
                   appearance={{

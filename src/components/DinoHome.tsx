@@ -234,7 +234,7 @@ export default function DinoHome({ userId }: DinoHomeProps) {
     };
 
     return (
-        <div className="max-w-md mx-auto bg-white min-h-screen">
+        <div className="max-w-md mx-auto bg-white min-h-screen pt-20">
             {/* コンテンツエリア */}
             <div className="pb-20">
                 {renderContent()}
