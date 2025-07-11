@@ -20,8 +20,63 @@ model User {
   firstName String?
   lastName  String?
   imageUrl  String?
+  nickname  String?
+  age       Int?
+  totalSteps Int     @default(0)
+  coins     Int      @default(100)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  
+  // Relations
+  dinosaur  Dinosaur?
+  plants    Plant[]
+  walkingLogs WalkingLog[]
+}
+
+model Dinosaur {
+  id            String @id @default(cuid())
+  name          String @default("マイ恐竜")
+  level         Int    @default(1)
+  experience    Int    @default(0)
+  hunger        Int    @default(100) // 0-100
+  species       String @default("トリケラトプス")
+  appearanceState String @default("baby") // baby, child, adult
+  lastFed       DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations
+  userId        String @unique
+  user          User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Plant {
+  id            String   @id @default(cuid())
+  name          String
+  scientificName String?
+  imageUrl      String
+  isEdible      Boolean  @default(false)
+  isNewSpecies  Boolean  @default(false)
+  nutritionValue Int     @default(10) // 恐竜の空腹回復量
+  rarity        String   @default("common") // common, uncommon, rare, legendary
+  discoveredAt  DateTime @default(now())
+  
+  // Relations
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model WalkingLog {
+  id        String   @id @default(cuid())
+  date      DateTime @default(now())
+  steps     Int
+  experience Int
+  
+  // Relations
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, date])
 }
 
 model Post{
