@@ -14,18 +14,26 @@ export default function WalkingCounter({ userId, onStepsUpdate }: WalkingCounter
     const [sessionSteps, setSessionSteps] = useState(0);
     const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null);
 
+    const loadSteps = useCallback(async () => {
+        try {
+            const response = await fetch(`/api/user/${userId}/steps`);
+            if (response.ok) {
+                const data = await response.json();
+                const totalSteps = data.totalSteps || 0;
+                setSteps(totalSteps);
+                // 初期値の設定も遅延実行
+                setTimeout(() => {
+                    onStepsUpdate(totalSteps);
+                }, 0);
+            }
+        } catch (error) {
+            console.error('Error loading steps:', error);
+        }
+    }, [userId, onStepsUpdate]);
+
     useEffect(() => {
         loadSteps();
-    }, [userId]);
-
-    // 歩数更新用のコールバック
-    const updateSteps = useCallback((newSteps: number) => {
-        setSteps(newSteps);
-        // 状態更新を次のレンダリングサイクルまで遅延
-        setTimeout(() => {
-            onStepsUpdate(newSteps);
-        }, 0);
-    }, [onStepsUpdate]);
+    }, [loadSteps]);
 
     useEffect(() => {
         let interval: NodeJS.Timeout;
@@ -51,22 +59,7 @@ export default function WalkingCounter({ userId, onStepsUpdate }: WalkingCounter
         };
     }, [isWalking, onStepsUpdate]);
 
-    const loadSteps = async () => {
-        try {
-            const response = await fetch(`/api/user/${userId}/steps`);
-            if (response.ok) {
-                const data = await response.json();
-                const totalSteps = data.totalSteps || 0;
-                setSteps(totalSteps);
-                // 初期値の設定も遅延実行
-                setTimeout(() => {
-                    onStepsUpdate(totalSteps);
-                }, 0);
-            }
-        } catch (error) {
-            console.error('Error loading steps:', error);
-        }
-    };
+
 
     const startWalking = () => {
         setIsWalking(true);

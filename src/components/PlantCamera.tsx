@@ -18,6 +18,27 @@ interface PlantData {
     isNewSpecies: boolean;
 }
 
+// デバイスタイプを判定するユーティリティ関数
+const detectDeviceType = () => {
+    const userAgent = navigator.userAgent.toLowerCase();
+    const isMobile = /android|webos|iphone|ipad|ipod|blackberry|iemobile|opera mini/i.test(userAgent);
+    const isTablet = /ipad|android(?!.*mobile)/i.test(userAgent);
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    
+    return {
+        isMobile: isMobile && !isTablet,
+        isTablet,
+        isDesktop: !isMobile && !isTablet,
+        isTouchDevice,
+        platform: {
+            isIOS: /iphone|ipad|ipod/i.test(userAgent),
+            isAndroid: /android/i.test(userAgent),
+            isWindows: /windows/i.test(userAgent),
+            isMac: /mac/i.test(userAgent)
+        }
+    };
+};
+
 export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps) {
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
@@ -29,6 +50,7 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
     const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
     const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
     const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+    const [deviceInfo, setDeviceInfo] = useState<ReturnType<typeof detectDeviceType> | null>(null);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -36,6 +58,9 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
 
     // 使用可能なカメラデバイスを取得
     const getAvailableCameras = useCallback(async () => {
+        // deviceInfoがまだ設定されていない場合は何もしない
+        if (!deviceInfo) return;
+
         try {
             // MediaDevicesがサポートされているかチェック
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -44,25 +69,64 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
             }
 
             // まず権限を要求（短時間のストリームを作成して権限を取得）
-            const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
-            tempStream.getTracks().forEach(track => track.stop()); // すぐに停止
+            let tempStream: MediaStream | null = null;
+            try {
+                // デバイスタイプに応じた初期制約
+                const initialConstraints = deviceInfo.isMobile ? 
+                    { video: { facingMode: 'environment' } } : 
+                    { video: true };
+                    
+                tempStream = await navigator.mediaDevices.getUserMedia(initialConstraints);
+                tempStream.getTracks().forEach(track => track.stop()); // すぐに停止
+            } catch (permissionError) {
+                console.warn('カメラ権限取得エラー:', permissionError);
+                // 権限エラーでも続行を試みる
+            }
 
             const devices = await navigator.mediaDevices.enumerateDevices();
             const videoDevices = devices.filter(device => device.kind === 'videoinput');
             setAvailableCameras(videoDevices);
 
-            // デフォルトでリアカメラ（環境カメラ）を選択
-            const rearCamera = videoDevices.find(device =>
-                device.label.toLowerCase().includes('back') ||
-                device.label.toLowerCase().includes('rear') ||
-                device.label.toLowerCase().includes('environment')
-            );
+            console.log('検出されたカメラデバイス:', videoDevices);
+            console.log('デバイス情報:', deviceInfo);
 
-            if (rearCamera) {
-                setSelectedDeviceId(rearCamera.deviceId);
-            } else if (videoDevices.length > 0) {
-                setSelectedDeviceId(videoDevices[0].deviceId);
+            // デバイスタイプに応じたカメラ選択ロジック
+            let preferredCamera: MediaDeviceInfo | undefined;
+
+            if (deviceInfo.isMobile) {
+                // スマートフォン：リアカメラ（環境カメラ）を優先
+                preferredCamera = videoDevices.find(device => {
+                    const label = device.label.toLowerCase();
+                    return label.includes('back') || 
+                           label.includes('rear') || 
+                           label.includes('environment') ||
+                           label.includes('camera2 0') || // Android
+                           label.includes('0, facing back'); // iOS
+                });
+                setFacingMode('environment');
+            } else {
+                // デスクトップ/ラップトップ：Webカメラ（通常は最初のカメラ）を優先
+                preferredCamera = videoDevices.find(device => {
+                    const label = device.label.toLowerCase();
+                    return label.includes('webcam') || 
+                           label.includes('usb') ||
+                           label.includes('integrated') ||
+                           label.includes('front') ||
+                           !label.includes('virtual'); // 仮想カメラを除外
+                });
+                setFacingMode('user');
             }
+
+            // 優先カメラが見つからない場合は最初のカメラを使用
+            if (!preferredCamera && videoDevices.length > 0) {
+                preferredCamera = videoDevices[0];
+            }
+
+            if (preferredCamera) {
+                setSelectedDeviceId(preferredCamera.deviceId);
+                console.log(`選択されたカメラ: ${preferredCamera.label} (${deviceInfo.isMobile ? 'モバイル' : 'デスクトップ'})`);
+            }
+
         } catch (err) {
             console.error('カメラデバイス取得エラー:', err);
             if (err instanceof Error && err.name === 'NotAllowedError') {
@@ -71,12 +135,20 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                 setError('カメラデバイスの取得に失敗しました。デバイスにカメラが接続されているか確認してください。');
             }
         }
-    }, []);
+    }, [deviceInfo]);
 
     useEffect(() => {
         // コンポーネントマウント時に一度だけ実行
-        getAvailableCameras();
-    }, [getAvailableCameras]);
+        const deviceType = detectDeviceType();
+        setDeviceInfo(deviceType);
+    }, []);
+
+    useEffect(() => {
+        // deviceInfoが設定された後にカメラを取得
+        if (deviceInfo) {
+            getAvailableCameras();
+        }
+    }, [deviceInfo, getAvailableCameras]);
 
     // Mock植物データベース
     const mockPlants: PlantData[] = [
@@ -129,22 +201,38 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
 
     // カメラストリームの開始
     const startCamera = useCallback(async () => {
+        // deviceInfoがまだ設定されていない場合は何もしない
+        if (!deviceInfo) return;
+
         try {
             setError(null);
 
-            // より柔軟な制約設定
-            const constraints: MediaStreamConstraints = {
-                video: selectedDeviceId ? {
-                    deviceId: { exact: selectedDeviceId },
-                    width: { ideal: 1280, max: 1920 },
-                    height: { ideal: 720, max: 1080 }
-                } : {
-                    facingMode: facingMode,
-                    width: { ideal: 1280, max: 1920 },
-                    height: { ideal: 720, max: 1080 }
-                }
-            };
+            // デバイスタイプに応じた最適化された制約
+            let constraints: MediaStreamConstraints;
 
+            if (selectedDeviceId) {
+                // 特定のデバイスが選択されている場合
+                constraints = {
+                    video: {
+                        deviceId: { exact: selectedDeviceId },
+                        width: { ideal: deviceInfo.isMobile ? 1280 : 1920, max: 1920 },
+                        height: { ideal: deviceInfo.isMobile ? 720 : 1080, max: 1080 },
+                        frameRate: { ideal: 30, max: 60 }
+                    }
+                };
+            } else {
+                // facingModeを使用
+                constraints = {
+                    video: {
+                        facingMode: { ideal: facingMode },
+                        width: { ideal: deviceInfo.isMobile ? 1280 : 1920, max: 1920 },
+                        height: { ideal: deviceInfo.isMobile ? 720 : 1080, max: 1080 },
+                        frameRate: { ideal: 30, max: 60 }
+                    }
+                };
+            }
+
+            console.log('カメラ制約:', constraints);
             const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
             setStream(mediaStream);
             setIsCameraOpen(true);
@@ -152,10 +240,22 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
             if (videoRef.current) {
                 videoRef.current.srcObject = mediaStream;
                 // ビデオの再生を確実にする
-                videoRef.current.play().catch(err => {
-                    console.error('ビデオ再生エラー:', err);
-                });
+                try {
+                    await videoRef.current.play();
+                    console.log('カメラストリーム開始成功');
+                } catch (playError) {
+                    console.error('ビデオ再生エラー:', playError);
+                    // 自動再生に失敗した場合はユーザーアクションを待つ
+                }
             }
+
+            // 実際に使用されているカメラ情報をログ出力
+            const track = mediaStream.getVideoTracks()[0];
+            if (track) {
+                const settings = track.getSettings();
+                console.log('使用中のカメラ設定:', settings);
+            }
+
         } catch (err) {
             console.error('カメラアクセスエラー:', err);
             let errorMessage = 'カメラにアクセスできませんでした。';
@@ -164,17 +264,21 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                 if (err.name === 'NotAllowedError') {
                     errorMessage = 'カメラの使用が許可されていません。ブラウザの設定でカメラの使用を許可してください。';
                 } else if (err.name === 'NotFoundError') {
-                    errorMessage = 'カメラが見つかりませんでした。デバイスにカメラが接続されているか確認してください。';
+                    errorMessage = `カメラが見つかりませんでした。${deviceInfo.isMobile ? 'デバイスのカメラが正常に動作しているか' : 'ウェブカメラが接続されているか'}確認してください。`;
                 } else if (err.name === 'NotReadableError') {
-                    errorMessage = 'カメラは他のアプリケーションで使用中です。';
+                    errorMessage = 'カメラは他のアプリケーションで使用中です。他のアプリを終了してから再試行してください。';
                 } else if (err.name === 'OverconstrainedError') {
-                    errorMessage = 'カメラの設定に問題があります。他のカメラを試してください。';
+                    errorMessage = 'カメラの設定に問題があります。他のカメラを試すか、ページを再読み込みしてください。';
+                } else if (err.name === 'AbortError') {
+                    errorMessage = 'カメラの起動がキャンセルされました。';
+                } else {
+                    errorMessage = `カメラエラー: ${err.message}`;
                 }
             }
 
             setError(errorMessage);
         }
-    }, [facingMode, selectedDeviceId]);
+    }, [facingMode, selectedDeviceId, deviceInfo]);
 
     // カメラストリームの停止
     const stopCamera = useCallback(() => {
@@ -217,8 +321,12 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
 
     // カメラの向きを切り替え（facingMode使用）
     const switchCameraFacing = useCallback(() => {
-        setFacingMode(prev => prev === 'user' ? 'environment' : 'user');
+        const newFacingMode = facingMode === 'user' ? 'environment' : 'user';
+        setFacingMode(newFacingMode);
         setSelectedDeviceId(''); // デバイスIDをリセット
+        
+        console.log(`カメラ向き切り替え: ${facingMode} → ${newFacingMode}`);
+        
         if (isCameraOpen) {
             stopCamera();
             // 少し待ってから新しい向きでカメラを開始
@@ -226,10 +334,11 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                 startCamera();
             }, 100);
         }
-    }, [isCameraOpen, stopCamera, startCamera]);
+    }, [facingMode, isCameraOpen, stopCamera, startCamera]);
 
     // 特定のカメラデバイスに切り替え
     const switchToCamera = useCallback((deviceId: string) => {
+        console.log(`カメラデバイス切り替え: ${deviceId}`);
         setSelectedDeviceId(deviceId);
         if (isCameraOpen) {
             stopCamera();
@@ -336,10 +445,50 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
         <div className="p-6">
             <h2 className="text-2xl font-bold text-green-800 mb-6 text-center">草花カメラ</h2>
 
+            {/* デバイス情報表示 */}
+            {deviceInfo ? (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-4">
+                    <div className="flex items-center justify-center space-x-2 text-sm text-blue-700">
+                        {deviceInfo.isMobile ? (
+                            <Smartphone className="w-4 h-4" />
+                        ) : (
+                            <Monitor className="w-4 h-4" />
+                        )}
+                        <span className="font-medium">
+                            {deviceInfo.isMobile ? 'スマートフォン' : 'コンピュータ'}モードで実行中
+                        </span>
+                        <span className="text-blue-600">
+                            （{deviceInfo.isMobile ? 'リアカメラ' : 'Webカメラ'}優先）
+                        </span>
+                    </div>
+                    {availableCameras.length > 0 && (
+                        <div className="text-center text-xs text-blue-600 mt-1">
+                            {availableCameras.length}台のカメラを検出済み
+                        </div>
+                    )}
+                </div>
+            ) : (
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 mb-4">
+                    <div className="flex items-center justify-center space-x-2 text-sm text-gray-600">
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600"></div>
+                        <span>デバイス情報を読み込み中...</span>
+                    </div>
+                </div>
+            )}
+
             {/* エラー表示 */}
             {error && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-4">
                     <p className="text-red-700 text-sm">{error}</p>
+                    <div className="mt-2 text-xs text-red-600">
+                        デバイスタイプ: {deviceInfo?.isMobile ? 'モバイル' : 'デスクトップ'} | 
+                        プラットフォーム: {
+                            deviceInfo?.platform.isIOS ? 'iOS' :
+                            deviceInfo?.platform.isAndroid ? 'Android' :
+                            deviceInfo?.platform.isWindows ? 'Windows' :
+                            deviceInfo?.platform.isMac ? 'Mac' : '不明'
+                        }
+                    </div>
                 </div>
             )}
 
@@ -454,7 +603,7 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                             ref={fileInputRef}
                             type="file"
                             accept="image/*"
-                            capture="environment"
+                            capture={deviceInfo?.isMobile ? "environment" : undefined}
                             onChange={handleImageSelect}
                             className="hidden"
                         />
@@ -483,6 +632,11 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                         <h3 className="font-semibold text-yellow-800 mb-2">💡 使い方</h3>
                         <ul className="text-sm text-yellow-700 space-y-1">
                             <li>• カメラボタンで直接撮影できます</li>
+                            {deviceInfo?.isMobile ? (
+                                <li>• 📱 スマホ：自動的にリアカメラが起動します</li>
+                            ) : (
+                                <li>• 💻 PC：Webカメラが起動します</li>
+                            )}
                             <li>• フロント/リアカメラの切り替え可能</li>
                             <li>• AI が自動で植物を認識</li>
                             <li>• 食べられる草花は恐竜のエサに</li>
@@ -495,7 +649,17 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                         <h3 className="font-semibold text-blue-800 mb-2">🔧 カメラが起動しない場合</h3>
                         <ul className="text-sm text-blue-700 space-y-1">
                             <li>• ブラウザでカメラの使用を許可してください</li>
-                            <li>• 他のアプリでカメラを使用していないか確認</li>
+                            {deviceInfo?.isMobile ? (
+                                <>
+                                    <li>• 📱 スマホ：他のカメラアプリを終了してください</li>
+                                    <li>• プライベートモードではカメラ制限があります</li>
+                                </>
+                            ) : (
+                                <>
+                                    <li>• 💻 PC：Webカメラが正しく接続されているか確認</li>
+                                    <li>• 他のビデオ通話アプリを終了してください</li>
+                                </>
+                            )}
                             <li>• ページを再読み込みして再試行</li>
                             <li>• HTTPS接続が必要です（HTTPでは動作しません）</li>
                         </ul>

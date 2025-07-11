@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function POST(request: NextRequest) {
     try {
-        const { userId, plantData, imageUrl } = await request.json();
+        const { userId, plantData, imageUrl: _imageUrl } = await request.json();
 
         if (!userId || !plantData) {
             return NextResponse.json({ error: 'Invalid data' }, { status: 400 });
