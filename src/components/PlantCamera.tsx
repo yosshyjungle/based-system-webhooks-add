@@ -51,10 +51,22 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
     const [availableCameras, setAvailableCameras] = useState<MediaDeviceInfo[]>([]);
     const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
     const [deviceInfo, setDeviceInfo] = useState<ReturnType<typeof detectDeviceType> | null>(null);
+    const [videoDebugInfo, setVideoDebugInfo] = useState<{
+        readyState: number;
+        networkState: number;
+        currentTime: number;
+        duration: number;
+        videoWidth: number;
+        videoHeight: number;
+        paused: boolean;
+        ended: boolean;
+    } | null>(null);
+    const [streamMonitorId, setStreamMonitorId] = useState<NodeJS.Timeout | null>(null);
 
     const fileInputRef = useRef<HTMLInputElement>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null);
+    const videoEventListenersRef = useRef<(() => void)[]>([]);
 
     // 使用可能なカメラデバイスを取得
     const getAvailableCameras = useCallback(async () => {
@@ -238,15 +250,181 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
             setIsCameraOpen(true);
 
             if (videoRef.current) {
-                videoRef.current.srcObject = mediaStream;
+                const video = videoRef.current;
+                video.srcObject = mediaStream;
+                
+                // ビデオイベントリスナーを追加してデバッグ情報を収集
+                const updateVideoDebugInfo = () => {
+                    if (video) {
+                        setVideoDebugInfo({
+                            readyState: video.readyState,
+                            networkState: video.networkState,
+                            currentTime: video.currentTime,
+                            duration: video.duration || 0,
+                            videoWidth: video.videoWidth,
+                            videoHeight: video.videoHeight,
+                            paused: video.paused,
+                            ended: video.ended
+                        });
+                    }
+                };
+
+                // 既存のイベントリスナーをクリーンアップ
+                videoEventListenersRef.current.forEach(cleanup => cleanup());
+                videoEventListenersRef.current = [];
+
+                // ビデオイベントリスナーを設定（安定性向上）
+                const addVideoEventListener = (event: string, handler: (e?: any) => void) => {
+                    video.addEventListener(event, handler);
+                    videoEventListenersRef.current.push(() => video.removeEventListener(event, handler));
+                };
+
+                addVideoEventListener('loadstart', () => {
+                    console.log('Video: loadstart');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('loadedmetadata', () => {
+                    console.log('Video: loadedmetadata', {
+                        videoWidth: video.videoWidth,
+                        videoHeight: video.videoHeight,
+                        duration: video.duration
+                    });
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('loadeddata', () => {
+                    console.log('Video: loadeddata');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('canplay', () => {
+                    console.log('Video: canplay');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('canplaythrough', () => {
+                    console.log('Video: canplaythrough');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('playing', () => {
+                    console.log('Video: playing');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('pause', () => {
+                    console.log('Video: pause - checking if unexpected');
+                    updateVideoDebugInfo();
+                    
+                    // 予期しない一時停止の場合は自動再生を試行
+                    if (stream && stream.active) {
+                        console.warn('Unexpected video pause detected, attempting to resume');
+                        setTimeout(() => {
+                            if (video.paused && !video.ended) {
+                                video.play().catch(e => {
+                                    console.error('Failed to resume after unexpected pause:', e);
+                                    setError('ビデオが一時停止しました。画面をクリックして再開してください。');
+                                });
+                            }
+                        }, 100);
+                    }
+                });
+                addVideoEventListener('ended', () => {
+                    console.warn('Video: ended unexpectedly');
+                    updateVideoDebugInfo();
+                    setError('ビデオが終了しました。カメラを再起動しています...');
+                    
+                    // 自動的に再起動を試行
+                    setTimeout(() => {
+                        restartCamera();
+                    }, 1000);
+                });
+                addVideoEventListener('error', (e) => {
+                    console.error('Video error:', e);
+                    updateVideoDebugInfo();
+                    setError('ビデオエラーが発生しました。カメラを再起動してください。');
+                });
+                addVideoEventListener('emptied', () => {
+                    console.warn('Video: emptied (source removed)');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('stalled', () => {
+                    console.warn('Video: stalled (network issues)');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('suspend', () => {
+                    console.warn('Video: suspend (loading suspended)');
+                    updateVideoDebugInfo();
+                });
+                addVideoEventListener('waiting', () => {
+                    console.log('Video: waiting (buffering)');
+                    updateVideoDebugInfo();
+                });
+
                 // ビデオの再生を確実にする
                 try {
-                    await videoRef.current.play();
-                    console.log('カメラストリーム開始成功');
+                    // メタデータが読み込まれるまで待つ
+                    if (video.readyState < 1) {
+                        console.log('Waiting for video metadata...');
+                        await new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => reject(new Error('Video metadata timeout')), 10000);
+                            video.addEventListener('loadedmetadata', () => {
+                                clearTimeout(timeout);
+                                resolve(undefined);
+                            }, { once: true });
+                        });
+                    }
+                    
+                    // さらにcanplayイベントを待つ（より確実な再生のため）
+                    if (video.readyState < 3) {
+                        console.log('Waiting for video canplay...');
+                        await new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => reject(new Error('Video canplay timeout')), 5000);
+                            video.addEventListener('canplay', () => {
+                                clearTimeout(timeout);
+                                resolve(undefined);
+                            }, { once: true });
+                        });
+                    }
+                    
+                    // 明示的にビデオサイズを確認
+                    if (video.videoWidth === 0 || video.videoHeight === 0) {
+                        console.warn('Video dimensions are 0, but proceeding with play()');
+                    }
+                    
+                    await video.play();
+                    console.log('カメラストリーム開始成功', {
+                        videoWidth: video.videoWidth,
+                        videoHeight: video.videoHeight,
+                        readyState: video.readyState
+                    });
+                    updateVideoDebugInfo();
                 } catch (playError) {
                     console.error('ビデオ再生エラー:', playError);
-                    // 自動再生に失敗した場合はユーザーアクションを待つ
+                    updateVideoDebugInfo();
+                    
+                    // 自動再生に失敗した場合、ユーザーアクションでの再生を試みる
+                    const handleUserInteraction = async () => {
+                        try {
+                            await video.play();
+                            console.log('ユーザーアクション後の再生成功');
+                            updateVideoDebugInfo();
+                            // イベントリスナーを削除
+                            video.removeEventListener('click', handleUserInteraction);
+                        } catch (userPlayError) {
+                            console.error('ユーザーアクション後の再生もエラー:', userPlayError);
+                        }
+                    };
+                    
+                    video.addEventListener('click', handleUserInteraction, { once: true });
+                    setError('カメラは起動しましたが、映像の表示に問題があります。ビデオエリアをクリックして再生を試してください。');
                 }
+
+                // 3秒後にビデオが再生されていない場合の追加チェック
+                setTimeout(() => {
+                    if (video && video.paused && stream && stream.active) {
+                        console.warn('Video still paused after 3 seconds, attempting force play');
+                        video.play().catch(e => {
+                            console.error('Force play after timeout failed:', e);
+                            setError('映像の表示に問題があります。「映像を表示」ボタンまたはビデオエリアをクリックしてください。');
+                        });
+                    }
+                }, 3000);
             }
 
             // 実際に使用されているカメラ情報をログ出力
@@ -254,6 +432,99 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
             if (track) {
                 const settings = track.getSettings();
                 console.log('使用中のカメラ設定:', settings);
+                
+                // ストリームの状態を詳細に確認
+                console.log('MediaStream詳細:', {
+                    id: mediaStream.id,
+                    active: mediaStream.active,
+                    videoTracks: mediaStream.getVideoTracks().length,
+                    audioTracks: mediaStream.getAudioTracks().length,
+                    trackState: track.readyState,
+                    trackEnabled: track.enabled,
+                    trackMuted: track.muted,
+                    constraints: track.getConstraints(),
+                    capabilities: track.getCapabilities ? track.getCapabilities() : 'Not supported'
+                });
+
+                // トラックの終了を監視
+                track.addEventListener('ended', () => {
+                    console.warn('Video track ended unexpectedly');
+                    setError('カメラストリームが予期せず終了しました。カメラを再起動してください。');
+                    setIsCameraOpen(false);
+                });
+
+                track.addEventListener('mute', () => {
+                    console.warn('Video track muted');
+                    setError('カメラがミュートされました。他のアプリケーションでカメラが使用されている可能性があります。');
+                });
+
+                track.addEventListener('unmute', () => {
+                    console.log('Video track unmuted');
+                    setError(null);
+                });
+
+                // MediaStreamの継続監視を開始
+                const monitorId = setInterval(() => {
+                    if (mediaStream && track) {
+                        const isActive = mediaStream.active;
+                        const isLive = track.readyState === 'live';
+                        const trackEnabled = track.enabled;
+                        const trackMuted = track.muted;
+
+                        console.log('Stream monitor check:', {
+                            streamActive: isActive,
+                            trackLive: isLive,
+                            trackEnabled: trackEnabled,
+                            trackMuted: trackMuted,
+                            timestamp: new Date().toISOString()
+                        });
+
+                        // ストリームが非アクティブになった場合
+                        if (!isActive) {
+                            console.error('MediaStream became inactive');
+                            setError('カメラストリームが停止しました。自動的に再起動を試みます...');
+                            clearInterval(monitorId);
+                            setStreamMonitorId(null);
+                            
+                            // 2秒後に自動再起動を試行
+                            setTimeout(() => {
+                                console.log('Attempting automatic camera restart...');
+                                restartCamera();
+                            }, 2000);
+                            return;
+                        }
+
+                        // トラックが終了した場合
+                        if (track.readyState === 'ended') {
+                            console.error('Video track ended during monitoring');
+                            setError('カメラトラックが終了しました。自動的に再起動を試みます...');
+                            clearInterval(monitorId);
+                            setStreamMonitorId(null);
+                            
+                            setTimeout(() => {
+                                restartCamera();
+                            }, 2000);
+                            return;
+                        }
+
+                        // ビデオ要素の状態も確認
+                        if (videoRef.current) {
+                            const video = videoRef.current;
+                            if (video.ended) {
+                                console.warn('Video element ended unexpectedly');
+                                video.play().catch(e => {
+                                    console.error('Failed to restart video playback:', e);
+                                    setError('ビデオの再生が停止しました。画面をクリックして再開してください。');
+                                });
+                            }
+                        }
+                    }
+                }, 1000); // 1秒ごとに監視
+
+                setStreamMonitorId(monitorId);
+            } else {
+                console.error('No video track found in MediaStream');
+                setError('ビデオトラックが見つかりません。カメラの接続を確認してください。');
             }
 
         } catch (err) {
@@ -282,15 +553,32 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
 
     // カメラストリームの停止
     const stopCamera = useCallback(() => {
+        // ストリーム監視を停止
+        if (streamMonitorId) {
+            clearInterval(streamMonitorId);
+            setStreamMonitorId(null);
+            console.log('Stream monitoring stopped');
+        }
+
         if (stream) {
             stream.getTracks().forEach(track => track.stop());
             setStream(null);
         }
         setIsCameraOpen(false);
         if (videoRef.current) {
-            videoRef.current.srcObject = null;
+            // イベントリスナーをクリーンアップ
+            const video = videoRef.current;
+            video.srcObject = null;
+            
+            // 保存されたイベントリスナーのクリーンアップ関数を実行
+            videoEventListenersRef.current.forEach(cleanup => cleanup());
+            videoEventListenersRef.current = [];
+            
+            video.pause();
         }
-    }, [stream]);
+        setVideoDebugInfo(null);
+        setError(null);
+    }, [stream, streamMonitorId]);
 
     // 写真を撮影
     const capturePhoto = useCallback(() => {
@@ -350,7 +638,21 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
 
     // コンポーネントのクリーンアップ
     useEffect(() => {
+        // ページを離れる際のクリーンアップ
+        const handleBeforeUnload = () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+            if (streamMonitorId) {
+                clearInterval(streamMonitorId);
+            }
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        
         return () => {
+            handleBeforeUnload();
+            window.removeEventListener('beforeunload', handleBeforeUnload);
             stopCamera();
         };
     }, [stopCamera]);
@@ -431,6 +733,104 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
         }
     };
 
+    // カメラ権限を確認する関数
+    const checkCameraPermissions = useCallback(async () => {
+        try {
+            if (navigator.permissions) {
+                const permission = await navigator.permissions.query({ name: 'camera' as PermissionName });
+                console.log('Camera permission status:', permission.state);
+                return permission.state === 'granted';
+            }
+            return null; // 権限APIが利用できない場合
+        } catch (error) {
+            console.warn('Cannot check camera permissions:', error);
+            return null;
+        }
+    }, []);
+
+    // 手動でカメラを再起動する関数
+    const restartCamera = useCallback(async () => {
+        console.log('Camera restart requested');
+        
+        // 現在のストリームを停止
+        if (isCameraOpen) {
+            stopCamera();
+        }
+        
+        // 少し待ってから再起動
+        setTimeout(async () => {
+            try {
+                const hasPermission = await checkCameraPermissions();
+                if (hasPermission === false) {
+                    setError('カメラの使用が許可されていません。ブラウザの設定を確認してください。');
+                    return;
+                }
+                
+                // startCameraの処理を直接実行（循環参照を避けるため）
+                if (!deviceInfo) {
+                    setError('デバイス情報が読み込まれていません。ページを再読み込みしてください。');
+                    return;
+                }
+
+                setError(null);
+
+                // デバイスタイプに応じた最適化された制約
+                let constraints: MediaStreamConstraints;
+
+                if (selectedDeviceId) {
+                    constraints = {
+                        video: {
+                            deviceId: { exact: selectedDeviceId },
+                            width: { ideal: deviceInfo.isMobile ? 1280 : 1920, max: 1920 },
+                            height: { ideal: deviceInfo.isMobile ? 720 : 1080, max: 1080 },
+                            frameRate: { ideal: 30, max: 60 }
+                        }
+                    };
+                } else {
+                    constraints = {
+                        video: {
+                            facingMode: { ideal: facingMode },
+                            width: { ideal: deviceInfo.isMobile ? 1280 : 1920, max: 1920 },
+                            height: { ideal: deviceInfo.isMobile ? 720 : 1080, max: 1080 },
+                            frameRate: { ideal: 30, max: 60 }
+                        }
+                    };
+                }
+
+                console.log('Restart: Camera constraints:', constraints);
+                const mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+                setStream(mediaStream);
+                setIsCameraOpen(true);
+
+                if (videoRef.current) {
+                    const video = videoRef.current;
+                    video.srcObject = mediaStream;
+                    
+                    // 基本的なイベントリスナーのみ設定（重複を避ける）
+                    video.addEventListener('ended', () => {
+                        console.warn('Video ended after restart');
+                        setIsCameraOpen(false);
+                    }, { once: true });
+
+                    try {
+                        await video.play();
+                        console.log('Camera restart successful');
+                        setError(null);
+                    } catch (playError) {
+                        console.error('Video play failed after restart:', playError);
+                        setError('カメラは再起動しましたが、映像表示に問題があります。画面をクリックしてください。');
+                    }
+                }
+
+                console.log('Camera restart completed successfully');
+            } catch (err) {
+                console.error('Camera restart failed:', err);
+                setError('カメラの再起動に失敗しました。手動で「カメラを再起動」ボタンを押してください。');
+                setIsCameraOpen(false);
+            }
+        }, 500);
+    }, [isCameraOpen, stopCamera, checkCameraPermissions, deviceInfo, selectedDeviceId, facingMode]);
+
     const resetAll = () => {
         setSelectedImage(null);
         setRecognizedPlant(null);
@@ -492,6 +892,37 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                 </div>
             )}
 
+            {/* カメラ状態表示 */}
+            {isCameraOpen && videoDebugInfo && (
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-4">
+                    <h4 className="font-semibold text-green-800 mb-2">📹 カメラ状態</h4>
+                    <div className="grid grid-cols-2 gap-2 text-sm">
+                        <div className="text-green-700">
+                            <span className="font-medium">状態:</span> {videoDebugInfo.paused ? '一時停止' : '再生中'}
+                        </div>
+                        <div className="text-green-700">
+                            <span className="font-medium">解像度:</span> {videoDebugInfo.videoWidth}×{videoDebugInfo.videoHeight}
+                        </div>
+                        <div className="text-green-700">
+                            <span className="font-medium">準備状態:</span> {videoDebugInfo.readyState}/4
+                        </div>
+                        <div className="text-green-700">
+                            <span className="font-medium">ネットワーク:</span> {videoDebugInfo.networkState}/3
+                        </div>
+                    </div>
+                    {(videoDebugInfo.videoWidth === 0 || videoDebugInfo.videoHeight === 0) && (
+                        <div className="mt-2 text-orange-600 text-sm">
+                            ⚠️ 映像サイズが0です。カメラの接続を確認してください。
+                        </div>
+                    )}
+                    {videoDebugInfo.paused && (
+                        <div className="mt-2 text-orange-600 text-sm">
+                            ⚠️ ビデオが一時停止中です。画面をクリックして再生してください。
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* カメラビュー */}
             {isCameraOpen && (
                 <div className="space-y-4 mb-6">
@@ -541,8 +972,97 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                             autoPlay
                             playsInline
                             muted
+                            controls={false}
                             className="w-full h-64 object-cover"
+                            style={{ 
+                                display: 'block',
+                                backgroundColor: '#000',
+                                minHeight: '256px',
+                                maxHeight: '256px',
+                                width: '100%',
+                                objectFit: 'cover'
+                            }}
+                            onLoadStart={() => {
+                                console.log('Video onLoadStart');
+                                if (videoRef.current) {
+                                    console.log('Video element properties:', {
+                                        src: videoRef.current.src,
+                                        srcObject: videoRef.current.srcObject,
+                                        readyState: videoRef.current.readyState,
+                                        networkState: videoRef.current.networkState
+                                    });
+                                }
+                            }}
+                            onLoadedData={() => console.log('Video onLoadedData')}
+                            onCanPlay={() => {
+                                console.log('Video onCanPlay');
+                                // canplayイベントで再度play()を試行
+                                if (videoRef.current && videoRef.current.paused) {
+                                    videoRef.current.play().catch(e => console.warn('Play after canplay failed:', e));
+                                }
+                            }}
+                            onPlaying={() => console.log('Video onPlaying')}
+                            onError={(e) => console.error('Video onError:', e)}
+                            onClick={() => {
+                                // クリック時に手動再生を試行
+                                if (videoRef.current) {
+                                    videoRef.current.play().catch(e => console.warn('Manual play failed:', e));
+                                }
+                            }}
                         />
+
+                        {/* ビデオが表示されていない場合の代替表示 */}
+                        {videoDebugInfo && (videoDebugInfo.videoWidth === 0 || videoDebugInfo.videoHeight === 0) && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-gray-800 text-white">
+                                <div className="text-center">
+                                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2"></div>
+                                    <p className="text-sm mb-3">カメラを読み込み中...</p>
+                                    <button
+                                        onClick={() => {
+                                            console.log('Manual video play button clicked');
+                                            if (videoRef.current) {
+                                                videoRef.current.play()
+                                                    .then(() => console.log('Manual play successful'))
+                                                    .catch(e => console.error('Manual play failed:', e));
+                                            }
+                                        }}
+                                        className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded text-sm transition-colors"
+                                    >
+                                        映像を表示
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* ビデオが一時停止している場合の再生ボタン */}
+                        {videoDebugInfo && videoDebugInfo.paused && videoDebugInfo.videoWidth > 0 && (
+                            <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50 text-white">
+                                <button
+                                    onClick={() => {
+                                        console.log('Play button clicked');
+                                        if (videoRef.current) {
+                                            videoRef.current.play()
+                                                .then(() => console.log('Play after pause successful'))
+                                                .catch(e => console.error('Play after pause failed:', e));
+                                        }
+                                    }}
+                                    className="bg-green-500 hover:bg-green-600 text-white p-4 rounded-full transition-colors"
+                                >
+                                    <Camera className="w-8 h-8" />
+                                </button>
+                            </div>
+                        )}
+
+                        {/* デバッグ情報表示（開発時のみ） */}
+                        {videoDebugInfo && process.env.NODE_ENV === 'development' && (
+                            <div className="absolute top-16 left-4 bg-black bg-opacity-70 text-white p-2 rounded text-xs max-w-xs">
+                                <div>Ready: {videoDebugInfo.readyState}/4</div>
+                                <div>Network: {videoDebugInfo.networkState}/3</div>
+                                <div>Size: {videoDebugInfo.videoWidth}x{videoDebugInfo.videoHeight}</div>
+                                <div>Time: {videoDebugInfo.currentTime.toFixed(2)}s</div>
+                                <div>Paused: {videoDebugInfo.paused ? 'Yes' : 'No'}</div>
+                            </div>
+                        )}
 
                         {/* カメラコントロール */}
                         <div className="absolute bottom-4 left-0 right-0 flex justify-center space-x-4">
@@ -647,7 +1167,7 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                     {/* トラブルシューティング */}
                     <div className="bg-blue-50 rounded-lg p-4">
                         <h3 className="font-semibold text-blue-800 mb-2">🔧 カメラが起動しない場合</h3>
-                        <ul className="text-sm text-blue-700 space-y-1">
+                        <ul className="text-sm text-blue-700 space-y-1 mb-3">
                             <li>• ブラウザでカメラの使用を許可してください</li>
                             {deviceInfo?.isMobile ? (
                                 <>
@@ -663,6 +1183,12 @@ export default function PlantCamera({ userId, onFeedDinosaur }: PlantCameraProps
                             <li>• ページを再読み込みして再試行</li>
                             <li>• HTTPS接続が必要です（HTTPでは動作しません）</li>
                         </ul>
+                        <button
+                            onClick={restartCamera}
+                            className="w-full bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-lg text-sm transition-colors"
+                        >
+                            カメラを再起動
+                        </button>
                     </div>
                 </div>
             )}
